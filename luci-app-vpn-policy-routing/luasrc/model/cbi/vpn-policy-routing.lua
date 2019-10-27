@@ -1,5 +1,5 @@
--- local readmeURL = "https://github.com/openwrt/packages/tree/master/net/vpn-policy-routing/files/README.md"
-local readmeURL = "https://github.com/stangri/openwrt_packages/tree/master/vpn-policy-routing/files/README.md"
+local readmeURL = "https://github.com/openwrt/packages/tree/master/net/vpn-policy-routing/files/README.md"
+-- local readmeURL = "https://github.com/stangri/openwrt_packages/tree/master/vpn-policy-routing/files/README.md"
 
 -- function log(obj)
 -- 	if obj ~= nil then if type(obj) == "table" then luci.util.dumptable(obj) else luci.util.perror(obj) end else luci.util.perror("Empty object") end
@@ -13,7 +13,10 @@ local ip = require "luci.ip"
 local fs = require "nixio.fs"
 local jsonc = require "luci.jsonc"
 local http = require "luci.http"
+local nutil = require "nixio.util"
 local dispatcher = require "luci.dispatcher"
+local enabledFlag = uci:get(packageName, "config", "enabled")
+local enc
 
 local t = uci:get("vpn-policy-routing", "config", "supported_interface")
 if not t then
@@ -48,11 +51,16 @@ if lanIPAddr and lanNetmask then
 	laPlaceholder = ip.new(lanIPAddr .. "/" .. lanNetmask )
 end
 
+function is_wan(name)
+	return name:sub(1,3) == "wan" or name:sub(-3) == "wan"
+end
+
 function is_supported_interface(arg)
 	local name=arg['.name']
 	local proto=arg['proto']
 	local ifname=arg['ifname']
 
+	if name and is_wan(name) then return true end
 	if name and supportedIfaces:match('%f[%w]' .. name .. '%f[%W]') then return true end
 	if name and not ignoredIfaces:match('%f[%w]' .. name .. '%f[%W]') then
 		if type(ifname) == "table" then
@@ -84,125 +92,101 @@ local tmpfsVersion, tmpfsStatus = "", "Stopped"
 if tmpfs and tmpfs['data'] then
 	if tmpfs['data']['status'] and tmpfs['data']['status'] ~= "" then
 		tmpfsStatus = tmpfs['data']['status']
+		tmpfsStatus = tmpfsStatus:gsub('\\033[^ ]*', '&nbsp;✓')
 	end
 	if tmpfs['data']['version'] and tmpfs['data']['version'] ~= "" then
-		tmpfsVersion = " (" .. packageName .. " " .. tmpfs['data']['version'] .. ")"
+		tmpfsVersion = " [" .. packageName .. " " .. tmpfs['data']['version'] .. "]"
 	end
 end
 
-c = Map("vpn-policy-routing", translate("Openconnect, OpenVPN, PPTP, Wireguard and WAN Policy-Based Routing"))
-h = c:section(NamedSection, "config", "vpn-policy-routing", translate("Service Status") .. tmpfsVersion)
-local packageName = "vpn-policy-routing"
-local enabledFlag = uci:get(packageName, "config", "enabled")
-en = h:option(Button, "__toggle")
-if enabledFlag ~= "1" or tmpfsStatus:match("Stopped") then
-	en.title      = translate("Service is disabled/stopped")
-	en.inputtitle = translate("Enable/Start")
-	en.inputstyle = "apply important"
+m = Map("vpn-policy-routing", translate("VPN and WAN Policy-Based Routing"))
+
+h = m:section(NamedSection, "config", packageName, translate("Service Status") .. tmpfsVersion)
+
+if tmpfsStatus:match("ing") then
+	ss = h:option(DummyValue, "_dummy", translate("Service Status"))
+	ss.template = packageName .. "/status"
+	ss.value = tmpfsStatus .. '...'
 else
-	en.title      = translate("Service is enabled/started")
-	en.inputtitle = translate("Stop/Disable")
-	en.inputstyle = "reset important"
-	ds = h:option(DummyValue, "_dummy", translate("Service Status"))
-	ds.template = "vpn-policy-routing/status"
-	ds.value = tmpfsStatus
-	if not tmpfsStatus:match("Success") then
-		reload = h:option(Button, "__reload")
-		reload.title      = translate("Service started with error(s)")
-		reload.inputtitle = translate("Reload")
-		reload.inputstyle = "apply important"
-		function reload.write()
-			sys.exec("/etc/init.d/vpn-policy-routing reload")
-			http.redirect(dispatcher.build_url("admin/services/" .. packageName))
-		end
-	end
-end
-function en.write()
-	enabledFlag = enabledFlag == "1" and "0" or "1"
-	uci:set(packageName, "config", "enabled", enabledFlag)
-	uci:save(packageName)
-	uci:commit(packageName)
-	if enabledFlag == "0" then
-		sys.init.stop(packageName)
+	ss = h:option(DummyValue, "_dummy", translate("Service Status"))
+	if tmpfsStatus:match("Stopped") then
+		ss.template = packageName .. "/status"
 	else
-		sys.init.enable(packageName)
-		sys.init.start(packageName)
+		ss.template = packageName .. "/status-textarea"
 	end
-	http.redirect(dispatcher.build_url("admin/services/" .. packageName))
+	ss.value = tmpfsStatus
+	buttons = h:option(DummyValue, "_dummy")
+	buttons.template = packageName .. "/buttons"
 end
 
--- General options
-s1 = c:section(NamedSection, "config", "vpn-policy-routing", translate("Configuration"))
-s1.override_values = true
-s1.override_depends = true
-s1:tab("basic", translate("Basic Configuration"))
+-- General Options
+config = m:section(NamedSection, "config", "vpn-policy-routing", translate("Configuration"))
+config.override_values = true
+config.override_depends = true
 
-v = s1:taboption("basic", ListValue, "verbosity", translate("Output verbosity"),translate("Controls both system log and console output verbosity"))
-v:value("0", translate("Suppress/No output"))
-v:value("1", translate("Condensed output"))
-v:value("2", translate("Verbose output"))
-v.default = 2
+-- Basic Options
+config:tab("basic", translate("Basic Configuration"))
 
-se = s1:taboption("basic", ListValue, "strict_enforcement", translate("Strict enforcement"),translate("See the") .. " "
+verb = config:taboption("basic", ListValue, "verbosity", translate("Output verbosity"),translate("Controls both system log and console output verbosity."))
+verb:value("0", translate("Suppress/No output"))
+verb:value("1", translate("Condensed output"))
+verb:value("2", translate("Verbose output"))
+verb.default = 2
+
+se = config:taboption("basic", ListValue, "strict_enforcement", translate("Strict enforcement"),translate("See the") .. " "
   .. [[<a href="]] .. readmeURL .. [[#strict-enforcement" target="_blank">]]
-  .. translate("README") .. [[</a>]] .. " " .. translate("for details"))
+  .. translate("README") .. [[</a>]] .. " " .. translate("for details."))
 se:value("0", translate("Do not enforce policies when their gateway is down"))
 se:value("1", translate("Strictly enforce policies when their gateway is down"))
 se.default = 1
 
-dnsmasq = s1:taboption("basic", ListValue, "dnsmasq_enabled", translate("Use DNSMASQ for domain policies"),
-	translate("Please check the" .. " "
-  .. [[<a href="]] .. readmeURL .. [[#use-dnsmasq" target="_blank">]]
-  .. translate("README") .. [[</a>]] .. " " .. translate("before enabling this option.")))
-dnsmasq:value("0", translate("Disabled"))
-dnsmasq:value("1", translate("Enabled"))
-
-ipset = s1:taboption("basic", ListValue, "ipset_enabled", translate("Use ipsets"),
+dest_ipset = config:taboption("basic", ListValue, "dest_ipset", translate("The ipset option for remote policies"),
 	translate("Please check the") .. " "
   .. [[<a href="]] .. readmeURL .. [[#additional-settings" target="_blank">]]
   .. translate("README") .. [[</a>]] .. " " .. translate("before changing this option."))
-ipset:depends({dnsmasq_enabled="0"})
-ipset:value("", translate("Disabled"))
-ipset:value("1", translate("Enabled"))
+dest_ipset:value("", translate("Disabled"))
+dest_ipset:value("ipset", translate("Use ipset command"))
+dest_ipset:value("dnsmasq.ipset", translate("Use DNSMASQ ipset"))
+dest_ipset.default = ""
+dest_ipset.rmempty = true
 
-ipv6 = s1:taboption("basic", ListValue, "ipv6_enabled", translate("IPv6 Support"))
+src_ipset = config:taboption("basic", ListValue, "src_ipset", translate("The ipset option for local policies"),
+	translate("Please check the") .. " "
+  .. [[<a href="]] .. readmeURL .. [[#additional-settings" target="_blank">]]
+  .. translate("README") .. [[</a>]] .. " " .. translate("before changing this option."))
+src_ipset:value("0", translate("Disabled"))
+src_ipset:value("1", translate("Use ipset command"))
+
+ipv6 = config:taboption("basic", ListValue, "ipv6_enabled", translate("IPv6 Support"))
 ipv6:value("0", translate("Disabled"))
 ipv6:value("1", translate("Enabled"))
 
-s1:tab("advanced", translate("Advanced Configuration"),
+-- Advanced Options
+config:tab("advanced", translate("Advanced Configuration"),
 	"<br/>&nbsp;&nbsp;&nbsp;&nbsp;<b>" .. translate("WARNING:") .. "</b>" .. " " .. translate("Please make sure to check the") .. " "
 	.. [[<a href="]] .. readmeURL .. [[#additional-settings" target="_blank">]] .. translate("README") .. [[</a>]] .. " "
 	.. translate("before changing anything in this section! Change any of the settings below with extreme caution!") .. "<br/><br/>")
 
-supported = s1:taboption("advanced", DynamicList, "supported_interface", translate("Supported Interfaces"), translate("Allows to specify the list of interface names (in lower case) to be explicitly supported by the service. Can be useful if your OpenVPN tunnels have dev option other than tun* or tap*."))
-supported.optional = false
-supported.rmempty = true
+supportedIface = config:taboption("advanced", DynamicList, "supported_interface", translate("Supported Interfaces"), translate("Allows to specify the list of interface names (in lower case) to be explicitly supported by the service. Can be useful if your OpenVPN tunnels have dev option other than tun* or tap*."))
+supportedIface.optional = false
 
-ignored = s1:taboption("advanced", DynamicList, "ignored_interface", translate("Ignored Interfaces"), translate("Allows to specify the list of interface names (in lower case) to be ignored by the service. Can be useful if running both VPN server and VPN client on the router."))
-ignored.optional = false
-ignored.rmempty = true
+ignoredIface = config:taboption("advanced", DynamicList, "ignored_interface", translate("Ignored Interfaces"), translate("Allows to specify the list of interface names (in lower case) to be ignored by the service. Can be useful if running both VPN server and VPN client on the router."))
+ignoredIface.optional = false
 
-timeout = s1:taboption("advanced", Value, "boot_timeout", translate("Boot Time-out"), translate("Time (in seconds) for service to wait for WAN gateway discovery on boot."))
+timeout = config:taboption("advanced", Value, "boot_timeout", translate("Boot Time-out"), translate("Time (in seconds) for service to wait for WAN gateway discovery on boot."))
 timeout.optional = false
 timeout.rmempty = true
 
-iprule = s1:taboption("advanced", ListValue, "iprule_enabled", translate("IP Rules Support"), translate("Add an ip rule, not an iptables entry for policies with just the local address. Use with caution to manipulte policies priorities."))
-iprule:value("", translate("Disabled"))
+insert = config:taboption("advanced", ListValue, "iptables_rule_option", translate("IPTables rule option"), translate("Select Append for -A and Insert for -I."))
+insert:value("append", translate("Append"))
+insert:value("insert", translate("Insert"))
+insert.default = "append"
+
+iprule = config:taboption("advanced", ListValue, "iprule_enabled", translate("IP Rules Support"), translate("Add an ip rule, not an iptables entry for policies with just the local address. Use with caution to manipulte policies priorities."))
+iprule:value("0", translate("Disabled"))
 iprule:value("1", translate("Enabled"))
-iprule.rmempty = true
 
-proto_control = s1:taboption("advanced", ListValue, "proto_control", translate("Show Protocol Column"), translate("Shows the protocol column for policies, allowing you to assign a TCP, UDP or TCP/UDP protocol to a policy."))
-proto_control:value("", translate("Disabled"))
-proto_control:value("1", translate("Enabled"))
-proto_control.rmempty = true
-
-chain_control = s1:taboption("advanced", ListValue, "chain_control", translate("Show Chain Column"), translate("Shows the chain column for policies, allowing you to assign a TCP, UDP or TCP/UDP protocol to a policy."))
-chain_control:value("", translate("Disabled"))
-chain_control:value("1", translate("Enabled"))
-chain_control.rmempty = true
-
-icmp = s1:taboption("advanced", ListValue, "icmp_interface", translate("Default ICMP Interface"), translate("Force the ICMP protocol interface."))
-icmp:depends({output_chain_enabled="1"})
+icmp = config:taboption("advanced", ListValue, "icmp_interface", translate("Default ICMP Interface"), translate("Force the ICMP protocol interface."))
 icmp:value("", translate("No Change"))
 icmp:value("wan", translate("WAN"))
 uci:foreach("network", "interface", function(s)
@@ -211,96 +195,163 @@ uci:foreach("network", "interface", function(s)
 end)
 icmp.rmempty = true
 
-append_local = s1:taboption("advanced", Value, "append_local_rules", translate("Append local IP Tables rules"), translate("Special instructions to append iptables rules for local IPs/netmasks/devices."))
+append_local = config:taboption("advanced", Value, "append_src_rules", translate("Append local IP Tables rules"), translate("Special instructions to append iptables rules for local IPs/netmasks/devices."))
 append_local.rmempty = true
 
-append_remote = s1:taboption("advanced", Value, "append_remote_rules", translate("Append remote IP Tables rules"), translate("Special instructions to append iptables rules for remote IPs/netmasks."))
+append_remote = config:taboption("advanced", Value, "append_dest_rules", translate("Append remote IP Tables rules"), translate("Special instructions to append iptables rules for remote IPs/netmasks."))
 append_remote.rmempty = true
 
-wantid = s1:taboption("advanced", Value, "wan_tid", translate("WAN Table ID"), translate("Starting (WAN) Table ID number for tables created by the service."))
+wantid = config:taboption("advanced", Value, "wan_tid", translate("WAN Table ID"), translate("Starting (WAN) Table ID number for tables created by the service."))
 wantid.rmempty = true
 wantid.placeholder = "201"
+wantid.datatype    = 'and(uinteger, min(201))'
 
-wantid = s1:taboption("advanced", Value, "wan_mark", translate("WAN Table FW Mark"), translate("Starting (WAN) FW Mark for marks used by the service. High starting mark is used to avoid conflict with SQM/QoS. Change with caution together with") .. " " .. translate("Service FW Mask") .. ".")
-wantid.rmempty = true
-wantid.placeholder = "0x010000"
+wanmark = config:taboption("advanced", Value, "wan_mark", translate("WAN Table FW Mark"), translate("Starting (WAN) FW Mark for marks used by the service. High starting mark is used to avoid conflict with SQM/QoS. Change with caution together with") .. " " .. translate("Service FW Mask") .. ".")
+wanmark.rmempty = true
+wanmark.placeholder = "0x010000"
+wanmark.datatype    = "hex(8)"
 
-wantid = s1:taboption("advanced", Value, "fw_mask", translate("Service FW Mask"), translate("FW Mask used by the service. High mask is used to avoid conflict with SQM/QoS. Change with caution together with") .. " " .. translate("WAN Table FW Mark") .. ".")
-wantid.rmempty = true
-wantid.placeholder = "0xff0000"
+fwmask = config:taboption("advanced", Value, "fw_mask", translate("Service FW Mask"), translate("FW Mask used by the service. High mask is used to avoid conflict with SQM/QoS. Change with caution together with") .. " " .. translate("WAN Table FW Mark") .. ".")
+fwmask.rmempty = true
+fwmask.placeholder = "0xff0000"
+fwmask.datatype    = "hex(8)"
+
+config:tab("webui", translate("Web UI Configuration"))
+
+webui_enable_column = config:taboption("webui", ListValue, "webui_enable_column", translate("Show Enable Column"), translate("Shows the enable checkbox column for policies, allowing you to quickly enable/disable specific policy without deleting it."))
+webui_enable_column:value("0", translate("Disabled"))
+webui_enable_column:value("1", translate("Enabled"))
+
+webui_protocol_column = config:taboption("webui", ListValue, "webui_protocol_column", translate("Show Protocol Column"), translate("Shows the protocol column for policies, allowing you to assign a specific protocol to a policy."))
+webui_protocol_column:value("0", translate("Disabled"))
+webui_protocol_column:value("1", translate("Enabled"))
+
+webui_supported_protocol = config:taboption("webui", DynamicList, "webui_supported_protocol", translate("Supported Protocols"), translate("Display these protocols in protocol column in Web UI."))
+webui_supported_protocol.optional = false
+
+webui_chain_column = config:taboption("webui", ListValue, "webui_chain_column", translate("Show Chain Column"), translate("Shows the chain column for policies, allowing you to assign a PREROUTING, FORWARD, INPUT or OUTPUT chain to a policy."))
+webui_chain_column:value("0", translate("Disabled"))
+webui_chain_column:value("1", translate("Enabled"))
+
+webui_sorting = config:taboption("webui", ListValue, "webui_sorting", translate("Show Up/Down Buttons"), translate("Shows the Up/Down buttons for policies, allowing you to move a policy up or down in the list."))
+webui_sorting:value("0", translate("Disabled"))
+webui_sorting:value("1", translate("Enabled"))
+webui_sorting.default = "1"
+
 
 -- Policies
-p = Map("vpn-policy-routing")
-p.template="cbi/map"
+p = m:section(TypedSection, "policy", translate("Policies"), translate("Comment, interface and at least one other field are required. Multiple local and remote addresses/devices/domains and ports can be space separated. Placeholders below represent just the format/syntax and will not be used if fields are left blank."))
+p.template = "cbi/tblsection"
+enc = tonumber(uci:get("vpn-policy-routing", "config", "webui_sorting"))
+if not enc or enc ~= 0 then
+	p.sortable  = true
+end
+p.anonymous = true
+p.addremove = true
 
-s3 = p:section(TypedSection, "policy", translate("Policies"), translate("Comment, interface and at least one other field are required. Multiple local and remote addresses/devices/domains and ports can be space separated. Placeholders below represent just the format/syntax and will not be used if fields are left blank."))
-s3.template = "cbi/tblsection"
-s3.sortable  = true
-s3.anonymous = true
-s3.addremove = true
+enc = tonumber(uci:get("vpn-policy-routing", "config", "webui_enable_column"))
+if enc and enc ~= 0 then
+	le = p:option(Flag, "enabled", translate("Enabled"))
+	le.default = "1"
+end
 
 local comment = uci:get_first("vpn-policy-routing", "policy", "comment")
 if comment then
-	s3:option(Value, "comment", translate("Comment"))
+	p:option(Value, "comment", translate("Comment"))
 else
-	s3:option(Value, "name", translate("Name"))
+	p:option(Value, "name", translate("Name"))
 end
 
-la = s3:option(Value, "local_address", translate("Local addresses/devices"))
+la = p:option(Value, "src_addr", translate("Local addresses / devices"))
 if laPlaceholder then
 	la.placeholder = laPlaceholder
 end
 la.rmempty = true
+la.datatype    = 'list(neg(or(host,network,macaddr)))'
 
-lp = s3:option(Value, "local_port", translate("Local ports"))
-lp.datatype    = "list(neg(portrange))"
+lp = p:option(Value, "src_port", translate("Local ports"))
+lp.datatype    = 'list(neg(or(portrange, string)))'
 lp.placeholder = "0-65535"
 lp.rmempty = true
 
-ra = s3:option(Value, "remote_address", translate("Remote addresses/domains"))
+ra = p:option(Value, "dest_addr", translate("Remote addresses / domains"))
+ra.datatype    = 'list(neg(host))'
 ra.placeholder = "0.0.0.0/0"
 ra.rmempty = true
 
-rp = s3:option(Value, "remote_port", translate("Remote ports"))
-rp.datatype    = "list(neg(portrange))"
+rp = p:option(Value, "dest_port", translate("Remote ports"))
+rp.datatype    = 'list(neg(or(portrange, string)))'
 rp.placeholder = "0-65535"
 rp.rmempty = true
 
-proto = s3:option(ListValue, "proto", translate("Protocol"))
-proto.rmempty = true
-proto.default = "tcp"
-proto:value("tcp","TCP")
-proto:value("udp","UDP")
-proto:value("tcp udp","TCP/UDP")
-proto:depends("proto_control", "1")
+enc = tonumber(uci:get("vpn-policy-routing", "config", "webui_protocol_column"))
+if enc and enc ~= 0 then
+	proto = p:option(ListValue, "proto", translate("Protocol"))
+	proto:value("", "AUTO")
+	proto.default = ""
+	proto.rmempty = true
+	enc = uci:get_list("vpn-policy-routing", "config", "webui_supported_protocol")
+	local count = 0
+	for key, value in pairs(enc) do
+		count = count + 1
+		proto:value(value:lower(), value:gsub(" ", "/"):upper())
+	end
+	if count == 0 then
+		enc = { "tcp", "udp", "tcp udp", "icmp", "all" }
+		for key,value in pairs(enc) do
+			proto:value(value:lower(), value:gsub(" ", "/"):upper())
+		end
+	end
+end
 
-chain = s3:option(ListValue, "chain", translate("Chain"))
-chain.rmempty = true
-chain.default = "PREROUTING"
-chain:value("PREROUTING")
-chain:value("FORWARD")
-chain:value("INPUT")
-chain:value("OUTPUT")
-chain:depends("chain_control", "1")
+enc = tonumber(uci:get("vpn-policy-routing", "config", "webui_chain_column"))
+if enc and enc ~= 0 then
+	chain = p:option(ListValue, "chain", translate("Chain"))
+	chain:value("", "PREROUTING")
+	chain:value("FORWARD", "FORWARD")
+	chain:value("INPUT", "INPUT")
+	chain:value("OUTPUT", "OUTPUT")
+	chain.default = ""
+	chain.rmempty = true
+end
 
-gw = s3:option(ListValue, "interface", translate("Interface"))
--- gw.datatype = "network"
+gw = p:option(ListValue, "interface", translate("Interface"))
+gw.datatype = "network"
 gw.rmempty = false
-gw.default = "wan"
-gw:value("wan","WAN")
 uci:foreach("network", "interface", function(s)
 	local name=s['.name']
-	if is_supported_interface(s) then gw:value(name, string.upper(name)) end
+	if is_wan(name) then
+		gw:value(name, string.upper(name))
+		if not gw.default then gw.default = name end
+	elseif is_supported_interface(s) then 
+		gw:value(name, string.upper(name)) 
+	end
 end)
 
-dscp = Map("vpn-policy-routing")
-s6 = dscp:section(NamedSection, "config", "vpn-policy-routing", translate("DSCP Tagging"), translate("Set DSCP tags (in range between 1 and 63) for specific interfaces."))
-wan = s6:option(Value, "wan_dscp", translate("WAN DSCP Tag"))
-wan.datatype = "range(1,63)"
-wan.rmempty = true
+dscp = m:section(NamedSection, "config", "vpn-policy-routing", translate("DSCP Tagging"), translate("Set DSCP tags (in range between 1 and 63) for specific interfaces. See the") .. " "
+  .. [[<a href="]] .. readmeURL .. [[#dscp-tag-based-policies" target="_blank">]]
+  .. translate("README") .. [[</a>]] .. " " .. translate("for details."))
 uci:foreach("network", "interface", function(s)
 	local name=s['.name']
-	if is_supported_interface(s) then s6:option(Value, name .. "_dscp", string.upper(name) .. " " .. translate("DSCP Tag")).rmempty = true end
+	if is_supported_interface(s) then 
+		local x = dscp:option(Value, name .. "_dscp", string.upper(name) .. " " .. translate("DSCP Tag"))
+		x.rmempty = true
+		x.datatype = "range(1,63)"
+	end
 end)
 
-return c, p, dscp
+-- Includes
+inc = m:section(TypedSection, "include", translate("Custom User File Includes"), translate("Run the following user files after setting up but before restarting DNSMASQ. See the") .. " "
+  .. [[<a href="]] .. readmeURL .. [[#custom-user-files" target="_blank">]]
+  .. translate("README") .. [[</a>]] .. " " .. translate("for details."))
+inc.template = "cbi/tblsection"
+inc.sortable  = true
+inc.anonymous = true
+inc.addremove = true
+
+finc = inc:option(Flag, "enabled", translate("Enabled"))
+finc.optional = false
+finc.default = "1"
+inc:option(Value, "path", translate("Path")).optional = false
+
+return m
